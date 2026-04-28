@@ -1,0 +1,36 @@
+# Raw external datasets
+drone-racing-dataset/
+yolo_detection_baseline/racing_lab_dataset/
+
+# Generated datasets
+phase1_cnn/crop_dataset/
+phase1_cnn/debug_crop_dataset/
+
+# Training runs and model outputs
+runs/
+**/runs/
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# Large archives/videos/bags
+*.zip
+*.mp4
+*.avi
+*.bag
+*.db3
+*.sqlite3
+
+# Python cache/env
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
