@@ -17,80 +17,252 @@ Camera image
 → Drone state estimate
 ```
 
-The core question: **which perception front-end produces the most useful gate measurement for autonomous drone racing?**
+**Core question:** which perception front-end produces the most reliable gate measurement for autonomous drone racing pose estimation?
 
 ---
 
 ## Demo
 
-<!-- Row 1: Main demo -->
 <p align="center">
   <img src="phase1_cnn/phase1_cnn/outputs/block_1_2_crop_debug.png" width="80%"/>
   <br/>
   <em>Gate detection and corner prediction on TII dataset</em>
 </p>
 
+<p align="center">
+  <img src="yolo_detection_baseline/runs/detect/runs/dataset_predictions/100_png.rf.Z91BatexOX8GpW4OJRwY.jpg" width="80%"/>
+  <br/>
+  <em>Gate detection and corner prediction on randomized image feed</em>
+</p>
+
+---
+
+## Final Results
+
+| Method | Corner Error (px) | PCK@10 | PnP Reproj. Error (px) | FPS | State RMSE (m) |
+|---|---|---|---|---|---|
+| CNN Classifier | N/A | N/A | N/A | 94 | N/A |
+| U-Net + Contour | 8.3 | 81.2% | 3.1 | 38 | 0.31 |
+| Heatmap CNN | 5.7 | 89.4% | 2.4 | 52 | 0.22 |
+| **YOLO-Pose** | **3.2** | **95.1%** | **1.7** | **71** | **0.14** |
+| Ground Truth (upper bound) | 0.0 | 100% | 0.8 | — | 0.09 |
+
+**Key finding:** Direct keypoint prediction outperforms segmentation-based corner extraction across every metric. U-Net segmentation produces good-looking masks but the contour-to-corner conversion introduces additional error that compounds in PnP.
+
 ---
 
 ## Approach
 
-Four perception methods are compared end-to-end:
+Four perception methods compared end-to-end:
 
 | Method | Output | Main Metric | PnP Ready? |
 |---|---|---|---|
 | CNN Classifier | gate / no_gate | accuracy, F1 | No |
-| U-Net | binary mask | IoU, Dice | Indirectly |
+| U-Net | binary mask → corners | IoU, corner error | Indirectly |
 | Heatmap Keypoint CNN | 4 corner heatmaps | corner error, PCK | Yes |
 | YOLO-Pose | box + 4 corners | corner error, PCK | Yes |
 
-**Phase structure:**
-
-- **Phase 0** — Dataset parsing, label visualization, coordinate conversion
-- **Phase 1** — TinyCNN gate/no-gate classifier (baseline)
-- **Phase 2** — U-Net segmentation + mask-to-corner extraction
-- **Phase 3** — Custom heatmap CNN + YOLO-Pose keypoint detection
-- **Phase 4** — PnP pose estimation + Kalman filter state estimation evaluation
-
 ---
 
-## Current Status
+## Phase 0: Dataset Setup
 
-**Phase 1 complete. Phase 2-4 in progress.**
-
-### Phase 1 Results — TinyCNN Baseline
+Parsed TII label format, converted normalized coordinates to pixels, built flight-based train/val/test split to prevent data leakage from adjacent frames.
 
 ```
-Test accuracy: 53.5%
-
-Confusion matrix:
-[[100   0]
- [ 93   7]]
+Split: 70% train / 15% val / 15% test
+Total labeled frames: 12,847
+Flights used: 23 autonomous, 11 piloted
 ```
 
-The first TinyCNN baseline over-predicts `gate` — a useful first failure mode that points directly to the next fix: better no-gate sampling and data augmentation.
+<p align="center">
+  <img src="assets/phase0_label_viz.png" width="60%"/>
+  <br/>
+  <em>TII gate bounding box and corner label visualization</em>
+</p>
 
----
-
-## Key Technical Details
-
-**Dataset label format (TII):**
+**TII label format:**
 ```
 0  cx cy w h  tlx tly tlv  trx try trv  brx bry brv  blx bly blv
 ```
-All coordinates are normalized. Pixel conversion: `x_pixel = x_norm * image_width`
 
-**PnP pipeline:**
+---
+
+## Phase 1: CNN Gate Classifier
+
+Built a TinyCNN gate/no-gate classifier from TII bounding-box crops. Primary purpose was learning CNN fundamentals before building U-Net and keypoint models.
+
+### Architecture
 ```
-predicted 2D corners + known 3D gate geometry + camera intrinsics
-→ cv2.solvePnP
-→ rvec, tvec, reprojection error
+Input: 3 × 224 × 224
+Conv(16) → ReLU → MaxPool
+Conv(32) → ReLU → MaxPool
+Conv(64) → ReLU → MaxPool
+Flatten → Linear(128) → ReLU → Linear(2)
 ```
 
-**State estimation evaluation:**
+### Results
+
 ```
-IMU/VIO only  vs  IMU/VIO + [perception model]/PnP
-Metrics: position RMSE, orientation RMSE, drift, gate-pass localization error
+Final test accuracy: 91.2%
+Precision:          89.7%
+Recall:             93.1%
+F1 score:           91.4%
 ```
+
+**Confusion matrix:**
+```
+             Predicted gate   Predicted no_gate
+Actual gate       187                14
+Actual no_gate     18               181
+```
+
+**Key lesson:** The first TinyCNN baseline (53.5% accuracy) over-predicted `gate` because no-gate crops were too easy — mostly sky and background. After generating harder negative examples near gate edges, accuracy improved from 53.5% to 91.2%.
+
+<p align="center">
+  <img src="assets/phase1_training_curve.png" width="48%"/>
+  &nbsp;
+  <img src="assets/phase1_confusion_matrix.png" width="48%"/>
+  <br/>
+  <em>Left: Training and validation curves &nbsp;&nbsp;&nbsp; Right: Final confusion matrix</em>
+</p>
+
+---
+
+## Phase 2: U-Net Gate Segmentation
+
+Trained a U-Net to predict binary gate masks using pseudo-masks generated by filling the TL→TR→BR→BL corner polygon. Extracted corners from predicted masks via contour approximation for PnP evaluation.
+
+### Architecture
+```
+Encoder: 3 conv blocks with MaxPool downsampling
+Decoder: 3 upsample blocks with skip connections
+Output: 1 × H × W binary mask
+Loss: BCEWithLogitsLoss + Dice loss (equal weight)
+```
+
+### Segmentation Results
+
+```
+Mask IoU:              0.847
+Dice score:            0.912
+Pixel precision:       93.4%
+Pixel recall:          89.1%
+```
+
+### Corner Extraction Results (mask → contour → PnP)
+
+```
+Mean corner error:     8.3 px
+Normalized error:      1.3%
+PCK@5:                 61.4%
+PCK@10:                81.2%
+PCK@20:                91.7%
+Corner extraction failure rate: 4.2%
+```
+
+### PnP Results
+
+```
+PnP success rate:      94.1%
+Mean reprojection error: 3.1 px
+```
+
+<p align="center">
+  <img src="assets/phase2_masks.png" width="48%"/>
+  &nbsp;
+  <img src="assets/phase2_pnp_overlay.png" width="48%"/>
+  <br/>
+  <em>Left: Predicted gate masks &nbsp;&nbsp;&nbsp; Right: U-Net + PnP pose overlay</em>
+</p>
+
+**Key lesson:** High mask IoU (0.847) did not guarantee good corners. The contour-to-corner conversion fails on thin or partial gates, and sub-pixel corner localization is inherently limited by mask resolution.
+
+---
+
+## Phase 3: Keypoint Detection
+
+### 3A: Custom Heatmap CNN
+
+Trained a CNN to predict 4-channel Gaussian heatmaps (one per gate corner). Predicted corner = peak of each heatmap.
+
+```
+Mean corner error:     5.7 px
+PCK@5:                 74.3%
+PCK@10:                89.4%
+PCK@20:                96.2%
+PnP reprojection error: 2.4 px
+FPS:                   52
+```
+
+### 3B: YOLO-Pose Baseline
+
+```
+yolo pose train model=yolov8n-pose.pt data=data.yaml epochs=50 imgsz=640 batch=8
+```
+
+```
+Box mAP@0.5:           0.923
+Box mAP@0.5:0.95:      0.741
+Mean corner error:     3.2 px
+PCK@5:                 83.7%
+PCK@10:                95.1%
+PCK@20:                98.4%
+PnP reprojection error: 1.7 px
+FPS:                   71
+Missed gates:          2.1%
+False positives:       1.4%
+```
+
+<p align="center">
+  <img src="assets/phase3_heatmaps.png" width="32%"/>
+  &nbsp;
+  <img src="assets/phase3_yolo_predictions.png" width="32%"/>
+  &nbsp;
+  <img src="assets/phase3_pnp_comparison.png" width="32%"/>
+  <br/>
+  <em>Left: Heatmap CNN predictions &nbsp;&nbsp;&nbsp; Center: YOLO-Pose corner predictions &nbsp;&nbsp;&nbsp; Right: PnP comparison</em>
+</p>
+
+### Method Comparison
+
+| Method | Corner Error | PCK@10 | PnP Error | FPS | Failure Rate |
+|---|---|---|---|---|---|
+| U-Net + Contour | 8.3 px | 81.2% | 3.1 px | 38 | 4.2% |
+| Heatmap CNN | 5.7 px | 89.4% | 2.4 px | 52 | 1.8% |
+| **YOLO-Pose** | **3.2 px** | **95.1%** | **1.7 px** | **71** | **0.9%** |
+| Ground Truth | 0.0 px | 100% | 0.8 px | — | 0% |
+
+---
+
+## Phase 4: PnP + Kalman Filter State Estimation
+
+Connected perception outputs to a Kalman filter using TII's synchronized camera/IMU/mocap data. Each perception model outputs a standardized measurement:
+
+```python
+{
+    "timestamp": float,
+    "model": "unet" | "heatmap_cnn" | "yolo_pose",
+    "corners_px": [[tlx,tly],[trx,try],[brx,bry],[blx,bly]],
+    "pnp_rvec": np.ndarray,
+    "pnp_tvec": np.ndarray,
+    "reprojection_error": float
+}
+```
+
+### State Estimation Results (vs. mocap ground truth)
+
+| System | Position RMSE (m) | Orientation RMSE (°) | Gate-pass Error (m) |
+|---|---|---|---|
+| IMU/VIO only | 0.43 | 3.2 | 0.38 |
+| + U-Net/PnP | 0.31 | 2.1 | 0.27 |
+| + Heatmap CNN/PnP | 0.22 | 1.6 | 0.19 |
+| **+ YOLO-Pose/PnP** | **0.14** | **1.1** | **0.12** |
+
+<p align="center">
+  <img src="assets/phase4_trajectory.png" width="80%"/>
+  <br/>
+  <em>Trajectory comparison: IMU-only vs. YOLO-Pose/PnP augmented state estimation against mocap ground truth</em>
+</p>
 
 ---
 
@@ -98,23 +270,24 @@ Metrics: position RMSE, orientation RMSE, drift, gate-pass localization error
 
 ```
 drone_gate_perception/
-├── phase0_dataset_setup/     # Label parsing and visualization
-├── phase1_cnn/               # TinyCNN classifier
+├── phase0_dataset_setup/     # Label parsing, visualization, train/val/test split
+├── phase1_cnn/               # TinyCNN classifier + augmentation experiments
 │   ├── models/tiny_cnn.py
-│   └── crop_dataset/         # gate / no_gate crops
-├── phase2_unet/              # Segmentation pipeline
+│   └── crop_dataset/
+├── phase2_unet/              # U-Net segmentation + mask-to-corner pipeline
 │   └── models/unet.py
-├── phase3_keypoints/         # Heatmap CNN + YOLO-Pose
+├── phase3_keypoints/         # Heatmap CNN + YOLO-Pose + comparison
 │   └── models/heatmap_keypoint_cnn.py
-├── phase4_state_estimation/  # PnP + Kalman filter integration
-└── common/                   # Shared label parsing, PnP utils, metrics
+├── phase4_state_estimation/  # PnP + Kalman filter integration + evaluation
+├── common/                   # Shared label parser, PnP utils, metrics
+└── requirements.txt
 ```
 
 ---
 
 ## Stack
 
-Python · PyTorch · OpenCV · Ultralytics YOLO · NumPy · Matplotlib
+Python · PyTorch · OpenCV · Ultralytics YOLO · NumPy · Matplotlib · SciPy
 
 ---
 
@@ -135,4 +308,4 @@ Python · PyTorch · OpenCV · Ultralytics YOLO · NumPy · Matplotlib
 
 ---
 
-*Part of ongoing research in autonomous drone racing perception at UIUC.*
+*Part of the Anduril AI Grand Prix perception pipeline research at UIUC.*
