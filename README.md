@@ -25,18 +25,9 @@ The core question: **which perception front-end produces the most useful gate me
 
 <!-- Row 1: Main demo -->
 <p align="center">
-  <img src="assets/YOUR_DEMO_GIF.gif" width="80%"/>
+  <img src="phase1_cnn/phase1_cnn/outputs/block_1_2_crop_debug.png" width="80%"/>
   <br/>
   <em>Gate detection and corner prediction on TII dataset</em>
-</p>
-
-<!-- Row 2: Side by side comparisons -->
-<p align="center">
-  <img src="assets/YOUR_LABEL_VIZ.png" width="48%"/>
-  &nbsp;
-  <img src="assets/YOUR_RESULTS.png" width="48%"/>
-  <br/>
-  <em>Left: TII gate corner labels &nbsp;&nbsp;&nbsp; Right: TinyCNN training results</em>
 </p>
 
 ---
